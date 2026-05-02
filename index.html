@@ -2,7 +2,9 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>IdeaFlow</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
 body { background: #fff; color: #111; }
@@ -72,7 +74,7 @@ body { background: #fff; color: #111; }
 .no-idea { text-align: center; padding: 2rem; color: #ccc; font-size: 13px; }
 .detail-title { font-size: 15px; font-weight: 500; margin-bottom: 3px; }
 .detail-sum { font-size: 12px; color: #888; margin-bottom: 10px; }
-.refine-btn { font-size: 12px; color: #888; background: none; border: 1px solid #eee; border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+.delete-btn { font-size: 12px; color: #A32D2D; background: none; border: 1px solid #FCEBEB; border-radius: 8px; padding: 7px 12px; cursor: pointer; margin-left: 8px; }
 </style>
 </head>
 <body>
@@ -80,7 +82,7 @@ body { background: #fff; color: #111; }
   <div class="header">
     <div class="logo"><svg viewBox="0 0 18 18"><path d="M9 1l2 6h6l-5 3.5 2 6L9 13l-5 3.5 2-6L1 7h6z"/></svg></div>
     <div><div class="app-title">IdeaFlow</div><div class="app-sub">Capture · Plan · Track</div></div>
-    <div class="status" id="status">Checking...</div>
+    <div class="status" id="status">Connecting...</div>
   </div>
   <div class="tabs">
     <div class="tab active" onclick="goTab('capture')">+ New idea</div>
@@ -111,7 +113,7 @@ body { background: #fff; color: #111; }
     </div>
     <div class="section" id="tab-ideas">
       <div class="sec-label">Your ideas</div>
-      <div id="ideas-list"><div class="empty">No ideas yet!</div></div>
+      <div id="ideas-list"><div class="empty">Loading your ideas...</div></div>
     </div>
     <div class="section" id="tab-workflow">
       <div id="wf-content"><div class="no-idea">Select an idea to see workflow</div></div>
@@ -122,22 +124,44 @@ body { background: #fff; color: #111; }
   </div>
 </div>
 <script>
-let ideas=[], selId=null;
 const SERVER='https://ideaflow-server-production-82e1.up.railway.app';
+const SUPABASE_URL='https://qwvpdnwenpzxwrwslhfc.supabase.co';
+const SUPABASE_KEY='sb_publishable_nihOFwHH5BMAxnKtpG6KGQ_jHZHu28a';
+const{createClient}=supabase;
+const db=createClient(SUPABASE_URL,SUPABASE_KEY);
+let ideas=[],selId=null;
 
-async function checkServer(){
-  const el=document.getElementById('status');
-  const box=document.getElementById('info-box');
+async function loadIdeas(){
   try{
-    await fetch(SERVER+'/health');
-    el.textContent='● Online'; el.className='status';
-    box.textContent='✅ Connected to AI server — ready!'; box.className='info-box';
+    const{data,error}=await db.from('ideas').select('*').order('created_at',{ascending:false});
+    if(error)throw error;
+    ideas=data.map(row=>({id:row.id,title:row.title,summary:row.summary,raw:row.raw,tf:row.timeframe,pri:row.priority,st:row.stakeholders,res:row.resources,steps:row.steps||[],created:new Date(row.created_at).toLocaleDateString()}));
+    renderList();
+    document.getElementById('status').textContent='● Online';
+    document.getElementById('status').className='status';
+    document.getElementById('info-box').textContent='✅ Connected — ready!';
+    document.getElementById('info-box').className='info-box';
   }catch(e){
-    el.textContent='● Offline'; el.className='status offline';
-    box.textContent='⚠️ Server offline — open PowerShell and run: node server.js'; box.className='info-box err';
+    document.getElementById('status').textContent='● DB Offline';
+    document.getElementById('status').className='status offline';
+    document.getElementById('info-box').textContent='⚠️ Could not load ideas from database';
+    document.getElementById('info-box').className='info-box err';
   }
 }
-checkServer();
+
+async function saveIdea(idea){
+  const{data,error}=await db.from('ideas').insert({title:idea.title,summary:idea.summary,raw:idea.raw,timeframe:idea.tf,priority:idea.pri,stakeholders:idea.st,resources:idea.res,steps:idea.steps}).select().single();
+  if(error)throw error;
+  return data.id;
+}
+
+async function updateSteps(ideaId,steps){
+  await db.from('ideas').update({steps}).eq('id',ideaId);
+}
+
+async function deleteIdeaFromDB(ideaId){
+  await db.from('ideas').delete().eq('id',ideaId);
+}
 
 function goTab(t){
   ['capture','ideas','workflow','gantt'].forEach((n,i)=>{
@@ -145,6 +169,7 @@ function goTab(t){
     document.getElementById('tab-'+n).classList.toggle('active',n===t);
   });
 }
+
 function pct(idea){return !idea.steps.length?0:Math.round(idea.steps.filter(s=>s.done).length/idea.steps.length*100);}
 
 async function generatePlan(){
@@ -158,47 +183,61 @@ async function generatePlan(){
   document.getElementById('loading').classList.add('show');
   document.getElementById('err').classList.remove('show');
   try{
-    const r=await fetch(SERVER+'/generate',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-5',max_tokens:1500,
-        messages:[{role:'user',content:`Return ONLY valid JSON, no markdown.\nIdea: "${txt}"\nTimeframe: ${tf}, Priority: ${pri}, Stakeholders: ${st}, Resources: ${res}\n{"title":"max 6 words","summary":"one sentence","steps":[{"name":"step","description":"action","week":1,"duration":1}]}\n6-8 specific steps, fit within ${tf}.`}]
-      })
-    });
+    const r=await fetch(SERVER+'/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:1500,messages:[{role:'user',content:`Return ONLY valid JSON, no markdown.\nIdea: "${txt}"\nTimeframe: ${tf}, Priority: ${pri}, Stakeholders: ${st}, Resources: ${res}\n{"title":"max 6 words","summary":"one sentence","steps":[{"name":"step","description":"action","week":1,"duration":1}]}\n6-8 specific steps, fit within ${tf}.`}]})});
     if(!r.ok)throw new Error('Server error '+r.status);
-const data=await r.json();
-if(data.error){
-  const errMsg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
-  throw new Error(errMsg);
-}
+    const data=await r.json();
+    if(data.error)throw new Error(typeof data.error==='string'?data.error:JSON.stringify(data.error));
     const raw=(data.content||[]).map(c=>c.text||'').join('').trim();
     const m=raw.match(/\{[\s\S]*\}/);
     if(!m)throw new Error('No JSON found');
     const plan=JSON.parse(m[0]);
-    const idea={id:Date.now(),title:plan.title||'Untitled',summary:plan.summary||'',raw:txt,tf,pri,st,res,steps:(plan.steps||[]).map((s,i)=>({...s,id:i,done:false})),created:new Date().toLocaleDateString()};
-    ideas.unshift(idea); selId=idea.id;
+    const idea={title:plan.title||'Untitled',summary:plan.summary||'',raw:txt,tf,pri,st,res,steps:(plan.steps||[]).map((s,i)=>({...s,id:i,done:false}))};
+    const dbId=await saveIdea(idea);
+    idea.id=dbId;
+    idea.created=new Date().toLocaleDateString();
+    ideas.unshift(idea);
+    selId=idea.id;
     document.getElementById('idea-input').value='';
     document.getElementById('q-stake').value='';
     document.getElementById('q-res').value='';
-    renderAll(); goTab('workflow');
+    renderAll();
+    goTab('workflow');
   }catch(e){
     const el=document.getElementById('err');
-    el.textContent='❌ '+e.message; el.classList.add('show');
+    el.textContent='❌ '+e.message;
+    el.classList.add('show');
   }
   document.getElementById('gen-btn').disabled=false;
   document.getElementById('loading').classList.remove('show');
 }
 
 function pickIdea(id){selId=id;renderAll();goTab('workflow');}
-function toggleStep(iid,sid){const idea=ideas.find(i=>i.id===iid);if(!idea)return;const s=idea.steps.find(s=>s.id===sid);if(s)s.done=!s.done;renderAll();}
+
+async function toggleStep(ideaId,stepId){
+  const idea=ideas.find(i=>i.id===ideaId);
+  if(!idea)return;
+  const s=idea.steps.find(s=>s.id===stepId);
+  if(s)s.done=!s.done;
+  renderAll();
+  await updateSteps(ideaId,idea.steps);
+}
+
+async function deleteIdea(ideaId){
+  if(!confirm('Delete this idea?'))return;
+  await deleteIdeaFromDB(ideaId);
+  ideas=ideas.filter(i=>i.id!==ideaId);
+  if(selId===ideaId)selId=null;
+  renderAll();
+  goTab('ideas');
+}
+
 function renderAll(){renderList();renderWF();renderGantt();}
 
 function renderList(){
   const el=document.getElementById('ideas-list');
-  if(!ideas.length){el.innerHTML='<div class="empty">No ideas yet!</div>';return;}
+  if(!ideas.length){el.innerHTML='<div class="empty">No ideas yet. Capture your first one!</div>';return;}
   const bmap={High:'bh',Medium:'bm',Low:'bl'};
-  el.innerHTML=ideas.map(idea=>{const p=pct(idea);return`<div class="idea-card${selId===idea.id?' sel':''}" onclick="pickIdea(${idea.id})"><div class="idea-name">${idea.title}</div><div class="badges"><span class="badge ${bmap[idea.pri]||'bm'}">${idea.pri}</span><span class="badge bt">${idea.tf}</span><span class="badge bp">${p}% done</span></div><div class="pbar"><div class="pfill" style="width:${p}%"></div></div></div>`;}).join('');
+  el.innerHTML=ideas.map(idea=>{const p=pct(idea);return`<div class="idea-card${selId===idea.id?' sel':''}" onclick="pickIdea(${idea.id})"><div class="idea-name">${idea.title}</div><div class="badges"><span class="badge ${bmap[idea.pri]||'bm'}">${idea.pri}</span><span class="badge bt">${idea.tf}</span><span class="badge bp">${p}% done</span><span class="badge bt">${idea.created}</span></div><div class="pbar"><div class="pfill" style="width:${p}%"></div></div></div>`;}).join('');
 }
 
 function renderWF(){
@@ -206,7 +245,7 @@ function renderWF(){
   const idea=ideas.find(i=>i.id===selId);
   if(!idea){el.innerHTML='<div class="no-idea">Select an idea to see workflow</div>';return;}
   const p=pct(idea);
-  el.innerHTML=`<div class="detail-title">${idea.title}</div><div class="detail-sum">${idea.summary}</div><div class="prog-hd"><span>Progress</span><span>${p}%</span></div><div class="prog6"><div class="prog6fill" style="width:${p}%"></div></div><div class="sec-label">Action steps</div><div class="step-list">${idea.steps.map(s=>`<div class="step"><div class="snum${s.done?' done':''}">${s.id+1}</div><div class="stxt"><div class="sname${s.done?' done':''}">${s.name}</div><div class="sdesc">${s.description}</div></div><div class="swk">Wk ${s.week}</div><button class="chk${s.done?' done':''}" onclick="toggleStep(${idea.id},${s.id})"></button></div>`).join('')}</div>`;
+  el.innerHTML=`<div style="display:flex;align-items:center;margin-bottom:3px;"><div class="detail-title" style="flex:1;">${idea.title}</div><button class="delete-btn" onclick="deleteIdea(${idea.id})">🗑 Delete</button></div><div class="detail-sum">${idea.summary}</div><div class="prog-hd"><span>Progress</span><span>${p}%</span></div><div class="prog6"><div class="prog6fill" style="width:${p}%"></div></div><div class="sec-label">Action steps</div><div class="step-list">${idea.steps.map(s=>`<div class="step"><div class="snum${s.done?' done':''}">${s.id+1}</div><div class="stxt"><div class="sname${s.done?' done':''}">${s.name}</div><div class="sdesc">${s.description}</div></div><div class="swk">Wk ${s.week}</div><button class="chk${s.done?' done':''}" onclick="toggleStep(${idea.id},${s.id})"></button></div>`).join('')}</div>`;
 }
 
 function renderGantt(){
@@ -216,6 +255,8 @@ function renderGantt(){
   const maxW=Math.max(...idea.steps.map(s=>s.week+s.duration-1),1);
   el.innerHTML=`<div class="detail-title" style="margin-bottom:0.75rem;">${idea.title}</div><div style="overflow-x:auto;"><table class="gtable"><thead><tr><th style="min-width:120px;">Step</th><th>Wk</th><th style="min-width:160px;">Timeline</th><th>Status</th></tr></thead><tbody>${idea.steps.map(s=>{const l=Math.round(((s.week-1)/maxW)*100);const w=Math.max(Math.round((s.duration/maxW)*100),6);const col=s.done?'#1D9E75':'#378ADD';return`<tr><td style="font-size:12px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${s.name}</td><td style="font-size:11px;color:#ccc;">${s.week}</td><td><div class="gbar-bg"><div class="gbar" style="left:${l}%;width:${w}%;background:${col};"></div></div></td><td style="font-size:11px;color:${s.done?'#1D9E75':'#ccc'};">${s.done?'✓ Done':'Pending'}</td></tr>`;}).join('')}</tbody></table></div>`;
 }
+
+loadIdeas();
 </script>
 </body>
 </html>
